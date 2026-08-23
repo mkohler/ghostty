@@ -567,6 +567,11 @@ pub const Surface = extern struct {
         /// The mouse shape to show for the surface.
         mouse_shape: terminal.MouseShape = .default,
 
+        /// Frame callback used to coalesce mouse shape notifications. Terminal
+        /// applications may rapidly toggle mouse modes, but only the final
+        /// shape before the next frame is visible to the user.
+        mouse_shape_tick: c_uint = 0,
+
         /// Whether the mouse should be hidden or not as requested externally.
         mouse_hidden: bool = false,
 
@@ -1861,6 +1866,11 @@ pub const Surface = extern struct {
             priv.idle_rechild = null;
         }
 
+        if (priv.mouse_shape_tick != 0) {
+            self.as(gtk.Widget).removeTickCallback(priv.mouse_shape_tick);
+            priv.mouse_shape_tick = 0;
+        }
+
         if (priv.pending_horizontal_scroll_reset) |v| {
             if (glib.Source.remove(v) == 0) {
                 log.warn("unable to remove pending horizontal scroll reset source", .{});
@@ -2141,7 +2151,27 @@ pub const Surface = extern struct {
     pub fn setMouseShape(self: *Self, shape: terminal.MouseShape) void {
         const priv = self.private();
         priv.mouse_shape = shape;
+
+        // Cursor shape changes are only visible between frames. Coalesce
+        // transient changes so the last requested shape wins.
+        if (priv.mouse_shape_tick == 0) {
+            priv.mouse_shape_tick = self.as(gtk.Widget).addTickCallback(
+                onTickMouseShape,
+                null,
+                null,
+            );
+        }
+    }
+
+    fn onTickMouseShape(
+        widget: *gtk.Widget,
+        _: *gdk.FrameClock,
+        _: ?*anyopaque,
+    ) callconv(.c) c_int {
+        const self: *Self = gobject.ext.cast(Self, widget) orelse return 0;
+        self.private().mouse_shape_tick = 0;
         self.as(gobject.Object).notifyByPspec(properties.@"mouse-shape".impl.param_spec);
+        return 0;
     }
 
     pub fn getMouseHidden(self: *Self) bool {
